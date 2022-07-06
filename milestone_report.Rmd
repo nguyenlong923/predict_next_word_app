@@ -1,0 +1,934 @@
+---
+title: 'Capstone Project: N-gram model for predicting the next word'
+author: "Long Nguyen Hoang"
+date: "12/5/2018"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    theme: united
+subtitle: Milestone Report
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_knit$set(root.dir="/Users/longnguyenhoang/Documents/Courses/Coursera/Data\ Science\ Specialization/10\ Capstone\ Project/final/en_US/") 
+```
+
+## 1. Executive Summary  
+The goal of this Capstone project is to create a prediction algorithm to predict the next word based on a N-gram model (one, two or three words previously typed). We use the **[Coursera-Swiftkey](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)** dataset to build our model.  
+
+This Milestone Report summarizes the following steps:  
+
+1. Summarize the raw data and extract subsamples (i.e. 0.1, 0.5, 1 and 10 % of the raw data). 
+2. Define necessary cleaning and pre-processing protocol.  
+3. Exploratory analysis of word frequencies. We find that depending on the type of sources and sample sizes:   
+    + 50% of the content can be represented by 130–256 words  
+    + 90% of the content can be represented by 3994–8881 words  
+4. The model can be built based on weighted frequency and 90% percentile threshold of 0.5% subsample. The reasons are:  
+    + The number of word needed to represent a text source is saturated above 90% percentile. Most of the words after this threshold only appear one time and are misspelled or names.  
+    + The the number of word needed is convergent as the sample size increase so that 0.5% and 1% samples are sufficient in building the model.  
+    + Using a weighted frequency with equally weight among three sources results in a highly represented dictionary for all the sources.  
+    + 0.5% sample is preferred over 1% sample due to the efficiency in speed and memory requirement.  
+5. Determine strategy to build the N-gram model and build the first version of the model.  
+
+Note: In order to keep the report concise and clear, most of the code chunk are hidden. For reproducibility, the key functions customized to develop the report are shown in the appendix.  
+
+## 2. Coursera-Swiftkey Data  
+### 2.1. About the data  
+The data is publicly available on **[Coursera-Swiftkey](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)**. The data is from a Corpus that collected corpora from publicly available sources by a web crawler (click  **[here](https://www.coursera.org/learn/data-science-project/supplement/4phKX/about-the-copora)** for more information).  
+
+The data consists of four directories in four languages:  
+
+1. German: `de_DE`  
+2. English: `en_US`  
+3. Finnish: `fi_FI`  
+4. Russian: `ru_RU`  
+
+Each directories includes three text documents with data extracted from:  
+
+1. Blogs: `language.blogs.txt`  
+2. News: `language.news.txt`  
+3. Twitter: `language.twitter.txt`  
+
+In order to explore the data and conduct text mining we used the `tm` library (see **[Text Mining Infrastructure in R](https://www.jstatsoft.org/article/view/v025i05)** for more information). In this Capstone Project, we use only the English dataset. Therefore, the text processing protocol is customized to English. Misspelled and foreign words are not treated because they should not be frequent enough to represent a problem. In the case they are frequent enough they should be considered part of the language and vocabulary. On the other hand, profanity are treated at the final step so that other developers can easily choose whether or not to remove those swear words based on their interests.
+
+```{r library, echo=FALSE}
+library(tm)
+library(ggplot2)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(data.table)
+library(reshape2)
+library(glue)
+# Function
+# Function to sampling a small part of the whole dataset
+sampling <- function(text.files, percentage, seed) {
+    for (i in text.files) {
+        con <- file(i, "r") # Open a connection
+        text.dat <- readLines(con) # Read data
+        
+        for (j in percentage) {
+            set.seed(seed)
+            seclect_line = as.logical(rbinom(n=length(text.dat), size=1, prob=j/100))
+            text.sample <- text.dat[seclect_line]
+            dir.name <- paste("sample_", j,"pct", sep="")
+            if(!dir.exists(dir.name)) dir.create(dir.name) # Make directory if not exit
+            write(text.sample, file = paste(dir.name, "/", j,"pct_", i, sep="")) # Write to file
+        }
+        close(con) # Close connection
+    }
+} 
+
+# Function to remove unwanted characters
+remove_unwant.char <- function(text.dat){
+    # Text must be lower case first
+    # remove @ from emails
+    text.dat <- gsub("[^ ]{1,}@[^ ]{1,}", " ", text.dat)
+    text.dat <- gsub(" @[^ ]{1,}", " ", text.dat)
+    # remove # from hash tags
+    text.dat <- gsub("#[^ ]{1,}", " ", text.dat) 
+    # remove :// characters from websites and file systems
+    text.dat <- gsub("[^ ]{1,}://[^ ]{1,}", " ", text.dat) 
+    # remove unwanted non-alphabetical character
+    text.dat <- gsub("[`’‘]", "'", text.dat) # first replace ` ’‘ by '
+    text.dat <- gsub("[^a-z']", " ", text.dat) # remove characters that are not alphabet nor '
+    text.dat <- gsub("'{2,}", "'", text.dat) # replace '' by '
+    text.dat <- gsub("' ", " ", text.dat) # remove ' at the end of a word
+    text.dat <- gsub(" '", " ", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("^'", "", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("'$", "", text.dat) # remove ' at the end of a word
+    return(text.dat)
+}
+
+# Custom function for 2-gram and 3 gram 
+BigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 2), paste, 
+                  collapse = " "), use.names = FALSE)}
+TrigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 3), paste, 
+                  collapse = " "), use.names = FALSE)}
+
+# Function to build cumilative fraction table (only predict 2-letters words 
+# because < 2 letters easy to write on a phone and English has only 3 1-letter words)
+make_dict <- function(text.source, table="cumsum", tokenize=NA) {
+    if (!table %in% c("freq","frac","cumsum")) stop("Wrong table")
+    if (!tokenize %in% c(NA,"bigram","trigram")) stop("Wrong tokenize")
+    # Load text
+    raw.text <- VCorpus(DirSource(text.source))
+    # Pre-processing
+    # Transform to lower case
+    clean.text <- tm_map(raw.text, content_transformer(tolower))
+    # Remove unwanted characters
+    clean.text <- tm_map(clean.text, content_transformer(remove_unwant.char))
+    # Strip white sapce
+    clean.text <- tm_map(clean.text,stripWhitespace) 
+    # Compute term document matrix
+    if (is.na(tokenize)) tdm <- TermDocumentMatrix(clean.text, control=list(wordLengths=c(2,Inf)))
+    else if (tokenize == "bigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=BigramTokenizer))
+    else if (tokenize == "trigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=TrigramTokenizer))
+    
+    # Compute frequency table
+    freq.table <- data.frame(as.matrix(tdm))
+    freq.table$total <- rowSums(freq.table)
+    names(freq.table) <- c("blogs","news","twitter","total")
+    freq.table <- freq.table[order(freq.table$total, decreasing = T), ] # Reorder based on total frequency (so you weight every source equally)
+    if (table == "freq") return(freq.table)
+    else if(table == "frac") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        return(frac.table) 
+    } 
+    else if (table == "cumsum") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        # Compute cumulative fraction table
+        cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+        cumsum.table$nword <- seq(1:nrow(cumsum.table))
+        return(cumsum.table)
+    }
+}
+
+# Function to select words can cover a specific fraction of the sources
+select_word <- function(cumfrac, percentile) {
+    # Find the closest number of word to percentile
+    nword <- which.min(abs(cumfrac - percentile))
+    sel <- c(1:nword)
+    # There are words that do not appear in a source but still are high 
+    # fraction in other sources, this zero is to remove those word
+    good <- !duplicated(cumfrac[sel]) # The word is not in the dictionary, the cumulative fraction won't change
+    sel <- sel[good]
+    return(sel)
+}
+
+# Function to extract dictionary based on a certain percentile of total of souces
+extract_dict <- function(freq.table, percentile) {
+    frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+    cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+    sel <- select_word(cumsum.table$total, percentile)
+    return(freq.table[sel, ])
+}
+
+# Function to return a table comparing between dictionaries
+compare_table <- function(dict) {
+    compare.table <- data.frame()
+    for (i in 1:length(dict)) {
+        for(j in 1:length(dict)) {
+            if (j == i) compare.table[i,j] <- length(dict[[i]])
+            else compare.table[i,j] <- round(100*length(intersect(dict[[i]],dict[[j]]))/length(dict[[i]]),0)
+        } 
+    }
+    names(compare.table) <- names(dict)
+    row.names(compare.table) <- names(dict)
+    return(compare.table)
+}
+
+# Function to split and pre-process bigram, trigram dicionary
+process_ngram <- function(ngram.dict) {
+    ngram.str <- strsplit(row.names(ngram.dict), split = " ")
+    # Count the number of gram
+    ngram <- length(ngram.str[[1]])
+    # Create a vector and boolean vector to select word
+    ngram.str <- unlist(ngram.str)
+    sel.ngram.str <- rep(1:ngram, nrow(ngram.dict))
+    # Make new data frame
+    new.dict <- data.frame(ngram.str[sel.ngram.str == 1])
+    if (ngram > 1) {
+        for (i in 2:ngram) {
+            new.dict[[i]] <- cbind(ngram.str[sel.ngram.str == i])
+        }
+    }
+    names(new.dict) <- paste("word",1:ngram)
+    new.dict$frequency <- ngram.dict$total
+    return(new.dict)
+}
+
+# Remove profane words
+profane.words <- c("^ars(e|es)$","^as(s|ses)$","^arsehol(e|es)$","^asshol(e|es)$",
+                   "^bastar(d|ds)$","^bitc(h|hes)$","^bollocks$","^fucke(r|rs)$",
+                   "^crap$","^cunt$","^dam(n|nit|ned)$","^frigger$","^goddam(n|ned)$",
+                   "^godsdam(n|ned)$","^hel(l|ls)$","^holy$","^shi(t|ts|t's|tload|tty|ttier|tted|tfaced|tass)$",
+                   "^shitfuckdamncocksucker$","^jesus$","^judas$","^motherfucker$","^whor(e|es)$","^twat$",
+                   "^fuck","^nigga","^nigger")
+remove_profane <- function(dict) {
+    # Prepare a pattern
+    profane <- glue_collapse(profane.words,sep="|")
+    unsel <- vector(mode = "integer")
+    # Remove via each column
+    for(i in 1:ncol(dict)) {
+        unsel <- c(unsel,grep(profane,dict[[i]]))
+    }
+    unsel <- unique(unsel)
+    dict <- dict[-unsel, ]
+    return(dict)
+}
+```
+
+### 2.2. Data summary  
+We summarize the English dataset using the `wc` command:  
+```{r summary1, eval=FALSE}
+system("wc *.txt > wordCount.txt")
+wordCount <- read.table("wordCount.txt")
+names(wordCount) <- c("Number of Lines","Number of Words","Number of Characters",
+                      "File Name")
+wordCount
+```
+```{r summary2, cache=TRUE, echo=FALSE}
+wordCount <- read.table("wordCount.txt")
+names(wordCount) <- c("Number of Lines","Number of Words","Number of Characters",
+                      "File Name")
+wordCount
+```
+
+### 2.3. Sampling  
+Four subsamples of the English dataset (i.e. 0.1, 0.5, 1, 10%) are extracted into seperated directories using a customized function `sampling` (appendix 5.2):  
+```{r sampling, eval=FALSE}
+text.files = c("en_US.blogs.txt","en_US.news.txt","en_US.twitter.txt")
+percentage = c(0.1, 0.5, 1, 10)
+sampling(text.files = text.files, percentage = percentage, seed = 2018)
+```
+
+## 3. Exploratory analysis  
+### 3.1. Preprocessing data  
+To determine the preprocessing protocol, we first create the term document matrix from 0.5% subsample. The ultimate goal is to create an application facilitating typing. Therefore, one-letter words, which can be type very fast, are not included in the application. Morever, there are only three one-letter words in English which are "a", "I" and "O". Therefore, only words with two more letters are considered.  
+```{r pre1, cache=TRUE}
+sample0.5pct <- VCorpus(DirSource("sample_0.5pct"))
+# Create term document matrix with words having length more than one letter
+tdm0.5pct <- TermDocumentMatrix(sample0.5pct, control=list(wordLengths=c(2,Inf)))
+head(Terms(tdm0.5pct), 10)
+```
+The data contains punctuation or special characters that need to be removed. Besides, numbers also need to be removed. We could use the default functions from the package `tm` for the removal.  
+```{r pre2, cache=TRUE}
+# Transform characters into lower case
+clean_sample0.5pct <- tm_map(sample0.5pct, content_transformer(tolower))
+# Number removal
+clean_sample0.5pct <- tm_map(clean_sample0.5pct,removeNumbers)
+# Punctuation removal
+clean_sample0.5pct <- tm_map(clean_sample0.5pct,removePunctuation)
+tdm0.5pct <- TermDocumentMatrix(clean_sample0.5pct, control=list(wordLengths=c(2,Inf)))
+head(Terms(tdm0.5pct), 10)
+```
+10 first results for the search on "you"  
+```{r pre3, cache=TRUE, echo=FALSE}
+head(grep("^[^a-z]you|^you",Terms(tdm0.5pct),value=T),10)
+```
+The default functions cannot remove entirely punctuation and thus resulted in many forms of a same word. We therefore, use a customized function `remove_unwant.char` (appendix 5.2) for preprocessing.  
+```{r pre4, cache=TRUE}
+# Transform characters into lower case
+clean_sample0.5pct <- tm_map(sample0.5pct, content_transformer(tolower))
+# Remove unwanter characters (number, punctuation and special characters)
+clean_sample0.5pct <- tm_map(clean_sample0.5pct, content_transformer(remove_unwant.char))
+# Strip white sapce
+clean_sample0.5pct <- tm_map(clean_sample0.5pct,stripWhitespace) 
+tdm0.5pct <- TermDocumentMatrix(clean_sample0.5pct, control=list(wordLengths=c(2,Inf)))
+head(Terms(tdm0.5pct), 10)
+```
+10 first results for the search on "you"  
+```{r pre5, cache=TRUE, echo=FALSE}
+head(grep("^[^a-z]you|^you",Terms(tdm0.5pct),value=T),10)
+```
+The customized function seems more efficient. The number of words reduces substantially from 68738 to 35410 after preprocessing.  
+```{r pre_end, echo=FALSE}
+rm(list=c("clean_sample0.5pct","sample0.5pct","tdm0.5pct","wordCount"))
+```
+### 3.2. Word frequencies  
+#### 3.2.1. Most and least frequent words
+We use a customized function `make_dict` (appendix 5.3) to make a 1-gram dictionary from 0.5% subsample. 
+```{r wf1, cache=TRUE}
+freq0.5pct <- make_dict("sample_0.5pct", table="freq")
+```
+Most frequent words (ordered by the total frequency in all three sources).  
+```{r wf2}
+head(freq0.5pct,10)
+```
+Least frequent words.  
+```{r wf3}
+tail(freq0.5pct,10)
+```
+As expected, the most 10 frequent word are stop-words. Meanwhile, 8 over 10 of the least frequent words are misspelled or names. On the other hand, there is probably sparsity of words among sources and one word may appear at different frequencies in different sources. Our overall strategy is to use the frequency to order and select words for the model.  
+
+#### 3.2.2. Differences in frequency between text sources
+We calculate the normalized frequency of each word (%) as their frequency (the number of times a word appear) divided by the total frequency of all words and multiple with 100.  
+```{r cts1, cache=TRUE}
+frac0.5pct <- data.frame(apply(freq0.5pct, MARGIN = 2, FUN = function(x) 100*x/sum(x)))
+```
+The sparsity of word frequency among text sources are assessed in figure below. In the first three subplots (top left, top right and bottom left), each word is represented by a point indicating its normalized frequency (%) in news vs blogs, twitter vs blogs and news vs twitter, respectively. There are strong correlation between the sources. On the upper right corner, there are word with very high normalized frequency (from 0.1 to 1%). These words are certainly stop-words accounting for a large part of the sources. The sparsity increase toward the lower left corner. In this range, words which are specifically represented for one type of text source appear on the top or to the right. These specific words are useful to distinguish different text sources.  
+```{r cts2, echo=FALSE, cache=TRUE}
+plot1.dat <- subset(frac0.5pct, blogs < 1 & news < 1 & blogs !=0 & news !=0)
+p1 <- ggplot() + geom_point(data=plot1.dat, aes(blogs,news), shape=1, alpha=0.5, size=1) +
+    scale_x_log10() + scale_y_log10()
+# Blogs vs twitter
+plot2.dat <- subset(frac0.5pct, blogs < 1 & twitter < 1 & blogs !=0 & twitter !=0)
+p2 <- ggplot() + geom_point(data=plot2.dat, aes(blogs,twitter), shape=1, alpha=0.5, size=1) +
+    scale_x_log10() + scale_y_log10()
+# News vs twitter
+plot3.dat <- subset(frac0.5pct, news < 1 & twitter < 1 & news !=0 & twitter !=0)
+p3 <- ggplot() + geom_point(data=plot3.dat, aes(news,twitter), shape=1, alpha=0.5, size=1) +
+    scale_x_log10() + scale_y_log10()
+# Number of words as a fraction of text data
+cumsum0.5pct <- data.frame(apply(frac0.5pct, MARGIN = 2, cumsum))
+plot4.dat <- melt(cumsum0.5pct)
+names(plot4.dat) <- c("source","fraction")
+plot4.dat$nword <- rep(seq(1,nrow(cumsum0.5pct),by=1),4)
+p4 <- ggplot() + geom_line(data=plot4.dat, aes(nword,fraction, color=source)) +
+    labs(y="percentile of text sample", x="number of word") +
+    scale_color_manual(values = c("coral1","cornflowerblue","chartreuse4","grey"))
+grid.arrange(p1,p2,p3,p4, nrow=2,ncol=2)
+```
+
+The last subplot (bottom right) shows the relationship between percentile of text sources which is the cumulative normalized frequency and the number of word. The subplot shows that normalized frequency can be used as a criteria to reduce the number of word needed for a dictionary. The relationship is not linear. For example, it takes from 133 to 251 words to cover 50% of the different text sources. While it would takes from 5273 to 7561 words to cover 90% of the text sources. The normalized frequency of words are in descending order so that the cumulative normalized frequency rises exponentially with the first 5000 words and then increases gradually through the rest of words in the text sources. This leads to a saturation in the number of word above 90% percentile as almost all of the words above this threshold only appear one time. Inclusion of these words will not increase the accuracy of the prediction because they only apear one time and most of them are misspelled or names as shown in section 3.2.1 above. Meanwhile, the size of the model will increase significantly. Therefore, it is recommended to use a threshold of 90% percentile to build the model.  
+
+We further explore the potential of using cumulative normalized frequency to build our dictionary. For each text sources, we select words representing 50% of the content. We also use the total dictionary which represents the normalized frequency weighted equally among sources. The figure below shows the normalized frequency of each word in different text sources (<span style="color:red">blogs</span>, <span style="color:blue">news</span> and <span style="color:green">twitter</span>) versus its weighted normalized frequency. The filled circles show the intersection between the total dictionary and the text sources, while the open circles show the words that are in only one of the two dictionary (total or text sources). The dashed lines represent the frequency thresholds for the total dictionary (<span style="color:grey">grey vertical line</span>) and the text sources (<span style="color:red">red</span>, <span style="color:blue">blue</span> or <span style="color:green">green</span>) horizontal lines).  
+```{r cts3, echo=FALSE, cache=TRUE}
+# Using 50% dictionary to compare
+# Find the closest number of word to 50 percent
+blogs.nword <- which.min(abs(cumsum0.5pct$blogs - 50))
+news.nword <- which.min(abs(cumsum0.5pct$news - 50))
+twitter.nword <- which.min(abs(cumsum0.5pct$twitter - 50))
+total.nword <- which.min(abs(cumsum0.5pct$total - 50))
+nword <- c(blogs.nword,news.nword,twitter.nword,
+           total.nword)[which.max(c(blogs.nword,news.nword,twitter.nword,total.nword))]
+# Make dictionary
+dic50 <- frac0.5pct[1:nword,]
+# Finding if a word appear on both total and individual dictionary
+# Blogs
+dic50$blogs.total <- 0
+dic50$blogs.total[1:blogs.nword] <- dic50$blogs.total[1:blogs.nword] + 1
+dic50$blogs.total[1:total.nword] <- dic50$blogs.total[1:total.nword] + 1
+dic50$blogs.total[which(dic50$blogs == 0)] <- 0 # Avoid plotting zero
+# News
+dic50$news.total <- 0
+dic50$news.total[1:news.nword] <- dic50$news.total[1:news.nword] + 1
+dic50$news.total[1:total.nword] <- dic50$news.total[1:total.nword] + 1
+dic50$news.total[which(dic50$news == 0)] <- 0 # Avoid plotting zero
+# Twitter
+dic50$twitter.total <- 0
+dic50$twitter.total[1:twitter.nword] <- dic50$twitter.total[1:twitter.nword] + 1
+dic50$twitter.total[1:total.nword] <- dic50$twitter.total[1:total.nword] + 1
+dic50$twitter.total[which(dic50$twitter == 0)] <- 0 # Avoid plotting zero
+# Threshold for each source
+plot5.hline <- c(min(dic50$blogs[1:blogs.nword][dic50$blogs[1:blogs.nword]!=0]),
+                 min(dic50$news[1:news.nword][dic50$news[1:news.nword]!=0]),
+                 min(dic50$twitter[1:twitter.nword][dic50$twitter[1:twitter.nword]!=0]))
+# Plot
+ggplot() + geom_point(data=dic50[dic50$blogs.total!=0, ], 
+                      aes(total,blogs,shape=factor(blogs.total)),color="coral1",alpha=0.7) +
+    geom_point(data=dic50[dic50$news.total!=0, ], 
+               aes(total,news,shape=factor(news.total)), color="cornflowerblue",alpha=0.7) +
+    geom_point(data=dic50[dic50$twitter.total!=0, ], 
+               aes(total,twitter,shape=factor(twitter.total)), color="chartreuse4",alpha=0.7) +
+    geom_hline(yintercept=plot5.hline, color=c("coral1","cornflowerblue",
+                                               "chartreuse4"),linetype=2) +
+    geom_vline(xintercept=dic50$total[total.nword],linetype=2, color="grey",size=1) +
+    scale_x_log10(limits=c(0.005,5)) + 
+    scale_y_log10(limits=c(0.005,5)) + 
+    scale_shape_manual(values=c(1,16)) + 
+    labs(y="normalized frequency", x="weighted normalized frequency") +
+    theme(legend.position="none")
+```
+
+The figure shows that building the dictionary using normalized frequency is sensitive to the type of text sources. In the left of the grey line, the open circles show words that are not covered by the total dictionary. Meanwhile, the open circles below horizontal lines are words that not in a text source but are frequent enough in other sources so that they are part of the total dictionary. From this figure, multiple strategies can be use:  
+
+1. The most conservative approach is using union of three text sources (all circles)  
+2. The most selective approach is using intersection of the 3 text sources (filled circles)  
+3. Alternatively, we could select words using the weighted normalized frequency in the total dictionary (points on the right of the vertical line)  
+    
+The third approach, however, raises the question on how to weight the sources. In this report, the sources are weighted equally. For different approach they could be weighted by the number of words in each sources or the relevance of the sources to the goal of prediction. The different weighting method are heavily depend on the interest and justification of different developers.  
+```{r cts_end, echo=FALSE}
+rm(list=c("cumsum0.5pct","dic50","frac0.5pct","freq0.5pct","plot1.dat",
+          "plot2.dat","plot3.dat","plot4.dat"))
+```
+### 3.3. One-gram dictionary  
+In this section we explore the features of a one-gram dictionary.  
+
+#### 3.3.1. Size convergence  
+We use all subsamples to compare and assess the number of word needed for a certain percentile of a text source.  
+```{r convergence1, cache=TRUE}
+cumsum0.1pct <- make_dict("sample_0.1pct")
+cumsum0.5pct <- make_dict("sample_0.5pct")
+cumsum1pct <- make_dict("sample_1pct")
+cumsum10pct <- make_dict("sample_10pct")
+```
+Figure below shows such comparision of number of word versus percentile of text sample between different text sources and subsamples. The horizontal lines illustrate the number of word needed to represent 50% and 90% of each specific text source and of the combined total souces. As the size of the sample increase from 0.1% to 10%, the differences in the number of word needed decrease.  
+
+```{r convergence2, echo=FALSE, cache=TRUE}
+# 0.1%
+cumsum0.1pct.melt <- melt(cumsum0.1pct,id="nword")
+cumsum0.1pct.melt$sample <- rep("0.1%", nrow(cumsum0.1pct.melt))
+# 0.5%
+cumsum0.5pct.melt <- melt(cumsum0.5pct, id="nword")
+cumsum0.5pct.melt$sample <- rep("0.5%", nrow(cumsum0.5pct.melt))
+# 1%
+cumsum1pct.melt <- melt(cumsum1pct,id="nword")
+cumsum1pct.melt$sample <- rep("1%", nrow(cumsum1pct.melt))
+# 10%
+cumsum10pct.melt <- melt(cumsum10pct,id="nword")
+cumsum10pct.melt$sample <- rep("10%", nrow(cumsum10pct.melt))
+# Format data to plot
+cumsum.all <- rbind(cumsum0.1pct.melt,cumsum0.5pct.melt,cumsum1pct.melt,
+                    cumsum10pct.melt)
+names(cumsum.all)[2:3] <- c("source","fraction")
+nword.dat <- data.frame(sample = rep(c("0.1%","0.5%","1%","10%"), each = 8),
+                        percentile = rep(rep(c("50%","90%"),each=4),4),
+                        source = rep(c("blogs","news","twitter","total"),8),
+                        nword = c(sapply(apply(cumsum0.1pct[,c(1:4)], MARGIN = 2, FUN = select_word, 50),length),
+                                  sapply(apply(cumsum0.1pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90),length),
+                                  sapply(apply(cumsum0.5pct[,c(1:4)], MARGIN = 2, FUN = select_word, 50),length),
+                                  sapply(apply(cumsum0.5pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90),length),
+                                  sapply(apply(cumsum1pct[,c(1:4)], MARGIN = 2, FUN = select_word, 50),length),
+                                  sapply(apply(cumsum1pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90),length),
+                                  sapply(apply(cumsum10pct[,c(1:4)], MARGIN = 2, FUN = select_word, 50),length),
+                                  sapply(apply(cumsum10pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90),length)))
+```
+
+```{r convergence3, echo=FALSE, cache=TRUE}
+# Plot
+g6  <- ggplot() + geom_line(data=cumsum.all, aes(fraction,nword, color=source), size=1) +
+    scale_y_log10(breaks=c(10,100,1000,10000,100000),labels = scales::comma)
+g6 + geom_hline(data = nword.dat,aes(yintercept=nword,color=source,linetype=percentile)) +
+    facet_wrap(~ sample, nrow=1) + 
+    scale_linetype_manual(values=c("longdash","dashed")) +
+    labs(x="percentile of text sample", y="number of word") +
+    scale_color_manual(values = c("coral1","cornflowerblue","chartreuse4","grey"))
+```
+
+The requirements for 50% and 90% percentile of 0.5%, 1% sample and the 10% sample are very similar as also shown in the table below. This describes a convergence of sample size and therefore, using a subsample of 0.5% or 1% is sufficient and even more efficient in speed and memory requirement than using a large subsample like 10%. Meanwhile, using a subsample of 0.1% is insufficient.  
+```{r convergence4, echo=FALSE, cache=TRUE}
+dcast(nword.dat, sample + percentile ~ source)
+```
+#### 3.3.2. Differences in content between text sources  
+Based on the size convergence and the saturation in the number of word, it is a good strategy to build an one-gram dictionary from 0.5% or 1% subsamples using 90% percentile as a threshold. We further explore the differences in content between text sources of the 0.5%, 1% and 10% subsamples. For each subsample, we create a list containing four vectors coressponding to three text sources and the combine one. Each vector consists of the ID of the words selected based on 90% percentile using a customized function `select_word` (appendix 5.3). We then use these ID lists to create new lists containing dictionanries built from different sources.  
+```{r dc1, cache=TRUE}
+# Creat lists containing vectors of the id of word to select from each text source
+sel0.5pct <- apply(cumsum0.5pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90)
+sel1pct <- apply(cumsum1pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90)
+sel10pct <- apply(cumsum10pct[,c(1:4)], MARGIN = 2, FUN = select_word, 90)
+# Make new lists of dictionaries by selecting word from each text source (words = row names)
+dict0.5pct <- list()
+dict1pct <- list()
+dict10pct <- list()
+for(i.name in names(sel0.5pct)) {
+    dict0.5pct[[i.name]] <- row.names(cumsum0.5pct[sel0.5pct[[i.name]], ])
+    dict1pct[[i.name]] <- row.names(cumsum1pct[sel1pct[[i.name]], ])
+    dict10pct[[i.name]] <- row.names(cumsum10pct[sel10pct[[i.name]], ])
+}
+```
+For each subsample, the union and intersection of three text sources are computed. We then construct a matrix (appendix 5.4) to display the results. The column shows different dictionaries, while each row shows the percentage of words in one dictionary that are included in the dictionaries shown in the column. For example in the 0.5% sample, 94% of words from blogs are included in news. Note that where the column name equal to the row name, the number of word in that dictionary is shown.    
+
+Similarity in content between dictionaries of 0.5% sample:  
+```{r dc2, cache=TRUE, echo=FALSE}
+dict0.5pct$union <- unique(c(dict0.5pct$blogs, dict0.5pct$news,dict0.5pct$twitter))
+dict0.5pct$intersection <- intersect(intersect(dict0.5pct$blogs,dict0.5pct$news),dict0.5pct$twitter)
+compare_table(dict0.5pct)
+```
+Similarity in content between dictionaries of 1% sample:  
+```{r dc3, cache=TRUE, echo=FALSE}
+dict1pct$union <- unique(c(dict1pct$blogs, dict1pct$news,dict1pct$twitter))
+dict1pct$intersection <- intersect(intersect(dict1pct$blogs,dict1pct$news),dict1pct$twitter)
+compare_table(dict1pct)
+```
+Similarity in content between dictionaries of 10% sample:  
+```{r dc4, cache=TRUE, echo=FALSE}
+dict10pct$union <- unique(c(dict10pct$blogs, dict10pct$news,dict10pct$twitter))
+dict10pct$intersection <- intersect(intersect(dict10pct$blogs,dict10pct$news),dict10pct$twitter)
+compare_table(dict10pct)
+```
+In all subsamples, the total dictionaries in all three samples contain high amount of words from three sources from (84% to 100%). It also shows that the content of news are quite distinct from the other two sources as blogs and twitter contain low percentage of words from news in all three subsamples (66% to 82%). Overall, it is recommended to use the total dictionary to make prediction algorithm since this dictionary highly represents all three sources across subsample.  
+
+#### 3.3.3. Differences in content between sample size  
+For further deciding between 0.5% and 1% samples, we now compare the content of the total dictionaries between sizes.
+```{r dc5, cache=TRUE, echo=FALSE}
+# Using 3 largest samples
+dict3 <- list()
+dict3[["0.5%"]] <- dict0.5pct$total
+dict3[["1%"]] <- dict1pct$total
+dict3[["10%"]] <- dict10pct$total
+# Making union & intersect dictionary
+dict3$union <- unique(c(dict3$`0.5%`,dict3$`1%`,dict3$`10%`))
+dict3$inter <- intersect(intersect(dict3$`0.5%`,dict3$`1%`),dict3$`10%`)
+compare_table(dict3)
+```
+It is show that the 0.5% samples have about 200-500 words less than 1% and 10% samples. However, it still contains high number of words from the larger samples (84-89%). This again illustrates the convergence in sample size and content. Therefore it is recommended using 0.5% sample to build the model since this will results in faster prediction with lower memory requirement.  
+```{r dc_end, echo=FALSE}
+rm(list=c("cumsum.all","cumsum0.1pct","cumsum0.1pct.melt","cumsum0.5pct","cumsum0.5pct.melt",
+          "cumsum10pct","cumsum10pct.melt","cumsum1pct.melt","cumsum1pct","dict0.5pct",
+          "dict10pct","dict1pct","dict3"))
+```
+
+### 3.3. Bi-gram and Tri-gram frequencies  
+To create a term document matrix of bi-gram and tri-gram we need to cusomize a tokenize function.  
+```{r tkf, eval=FALSE}
+# Custom function for 2-gram and 3 gram 
+BigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 2), paste, 
+                  collapse = " "), use.names = FALSE)}
+TrigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 3), paste, 
+                  collapse = " "), use.names = FALSE)}
+```
+We build one-gram, bi-gram and tri-gram dictionary using 0.5% sample and then extract 90% content using a customized function `extract_dict` (appendix 5.3).
+```{r b3d, cache=TRUE}
+# Building one gram dictionary
+og.dict <- make_dict(text.source="sample_0.5pct", table ="freq")
+og.dict <- extract_dict(og.dict,90) 
+# Building bi-gram dictionary
+bg.dict <- make_dict(text.source="sample_0.5pct", table="freq", tokenize="bigram")
+bg.dict <- extract_dict(bg.dict,90) 
+# Building tri-gram dictionary
+tg.dict <- make_dict(text.source="sample_0.5pct", table="freq", tokenize="trigram")
+tg.dict <- extract_dict(tg.dict,90) 
+```
+
+#### 3.3.1 Bi-gram frequencies  
+```{r bgf1, echo=FALSE,cache=TRUE}
+# Split string bi- and tri-gram dictionaries
+og.dict <- process_ngram(og.dict)
+bg.dict <- process_ngram(bg.dict)
+tg.dict <- process_ngram(tg.dict)
+# Check if word in bi and tri gram are in one gram
+bg.dict$`word 1 in og` <- rep(FALSE,nrow(bg.dict))
+bg.dict$`word 2 in og` <- rep(FALSE,nrow(bg.dict))
+bg.dict$`word 1 in og`[which(bg.dict$`word 1` %in% og.dict$`word 1`)] <- TRUE
+bg.dict$`word 2 in og`[which(bg.dict$`word 2` %in% og.dict$`word 1`)] <- TRUE
+
+tg.dict$`word 1 in og` <- rep(FALSE,nrow(tg.dict))
+tg.dict$`word 2 in og` <- rep(FALSE,nrow(tg.dict))
+tg.dict$`word 3 in og` <- rep(FALSE,nrow(tg.dict))
+tg.dict$`word 1 in og`[which(tg.dict$`word 1` %in% og.dict$`word 1`)] <- TRUE
+tg.dict$`word 2 in og`[which(tg.dict$`word 2` %in% og.dict$`word 1`)] <- TRUE
+tg.dict$`word 3 in og`[which(tg.dict$`word 3` %in% og.dict$`word 1`)] <- TRUE
+```
+Most frequent bi-grams.  
+```{r bgf2, echo=FALSE,cache=TRUE}
+head(bg.dict,10)
+```
+Least frequent bi-grams.  
+```{r bgf3, echo=FALSE,cache=TRUE}
+tail(bg.dict,10)
+```
+All the most frequent bi-gram contain words that are included in one-gram dictionary. While some of the least frequent bi-gram contain words that are not included in one-gram dictionary. A good modelling strategy is to use word 2 as the prediction. However, many bi-gram are equal in frequency but are currently ranked alphabetically as show in the tail of the bi-gram dictionary. This tie situtation could be solve by using the one-gram frequency.  
+```{r bgf4, echo=FALSE,cache=TRUE}
+bg.dict$missing <- bg.dict$`word 1 in og` + bg.dict$`word 2 in og`
+bg.none <- bg.dict$frequency[bg.dict$missing == 2]
+bg.mis1 <- bg.dict$frequency[bg.dict$missing == 1]
+bg.mis2 <- bg.dict$frequency[bg.dict$missing == 0]
+plot7.dat <- data.frame(frequency = c(bg.none,bg.mis1,bg.mis2), 
+                        group = c(rep("no word is missing", length(bg.none)),
+                                  rep("one word is missing", length(bg.mis1)),
+                                  rep("two words are missing", length(bg.mis2))))
+
+sp7 <- ggplotGrob(ggplot() + geom_bar(data = plot7.dat[plot7.dat$frequency <= 20,],
+                           aes(frequency,fill=group), colour = "black", binwidth = 1) +
+                      scale_y_log10()  + theme(legend.position = "none"))
+ggplot() + geom_bar(data = plot7.dat, aes(frequency,fill=group), binwidth = 50,
+                    colour = "black") + 
+    scale_y_log10() +
+    annotation_custom(grob = sp7, xmin=1000, ymin=5)
+```
+
+The histogram show the distribution of bi-gram according to their frequency. Most of the bi-grams having frequency of below 50, mainly one or five (as shown by the subplot inside). The subplot also shows that only bigrams that appear less than six times have words that are not included in the one-gram dictionary. This show an effciency of our one-gram dictionary in representing highly frequent words.  
+
+#### 3.3.2 Tri-gram frequencies  
+Most frequent tri-grams.  
+```{r tgf1, echo=FALSE,cache=TRUE}
+head(tg.dict,10)
+```
+Least frequent bi-grams.  
+```{r tgf2, echo=FALSE,cache=TRUE}
+tail(tg.dict,10)
+```
+Again, all the most frequent tri-gram contain words that are included in one-gram dictionary. While some of the least frequent tri-gram contain words that are not included in one-gram dictionary. A good modelling strategy is to use word 1 and 2 as the two previously typed words and word 3 as the prediction. For breaking the tie of frequency, we could use the frequency of the word 2 and word 3 in bi-gram frequency and word 3 in one-gram frequency.  
+```{r tgf3, echo=FALSE,cache=TRUE}
+tg.dict$missing <- tg.dict$`word 1 in og` + tg.dict$`word 2 in og` + tg.dict$`word 3 in og`
+tg.none <- tg.dict$frequency[tg.dict$missing == 3]
+tg.mis1 <- tg.dict$frequency[tg.dict$missing == 2]
+tg.mis2 <- tg.dict$frequency[tg.dict$missing == 1]
+tg.mis3 <- tg.dict$frequency[tg.dict$missing == 0]
+plot8.dat <- data.frame(frequency = c(tg.none,tg.mis1,tg.mis2,tg.mis3), 
+                        group = c(rep("no word is missing", length(tg.none)),
+                                  rep("one word is missing", length(tg.mis1)),
+                                  rep("two words are missing", length(tg.mis2)),
+                                  rep("three words are missing", length(tg.mis3))))
+# Reorder the level
+plot8.dat$group <- factor(plot8.dat$group, levels(plot8.dat$group)[c(1,2,4,3)])
+sp8 <- ggplotGrob(ggplot() + geom_bar(data = plot8.dat[plot8.dat$frequency <= 20,],
+                           aes(frequency,fill=group), colour = "black", binwidth = 1) +
+                      scale_y_log10()  + theme(legend.position = "none"))
+ggplot() + geom_bar(data = plot8.dat, aes(frequency,fill=group), binwidth = 5,
+                    colour = "black") + 
+    scale_y_log10() +
+    annotation_custom(grob = sp8, xmin=70, ymin=6)
+```
+
+The histogram show the distribution of tri-gram according to their frequency. Most of the tri-grams having frequency up to 10 times. It is also shown that only tri-grams that appear less than five times have words that are not included in the one-gram dictionary. This again show an effciency of our one-gram dictionary in representing highly frequent words. Overall, it is of high chance that bi-gram and tri-gram dictionary have similar features to one-gram dictionary such as convergence in sample size and content and saturation in the number of word. Therefore, similar strategy should be applied to build bi-gram and tri-gram dictionaries.  
+
+## 4. N-gram model for word prediction  
+### 4.1. Modelling strategy  
+Our goal is to predict the next word based on the two previsouly typed words.  
+
+1. For an input text, we will extract the last two words as the input of the model. 
+2. The last two words will be matched with word 1 and word 2 in the tri-gram dictionary so that three possible outcomes of word 3 with highest frequency of appearance (number of times these three words appear together in text sources) are returned.  
+    + The tri-gram dictionary will be ordered in a desending order by the frequency of tri-grams. This makes sure that when search the dictionary the first three results of word 3 are of highest frequency. 
+    + However, this raise a problem of tie frequency between tri-grams. To solve this tie situation, we will add to the dictionary frequency of bi-gram (word 2 and word 3) and of one-gram (word 3). We then order the data by highest frequencies of tri-gram, bi-gram and then one-gram.  
+    
+3. There will be cases when one of the two input words are missed or not known by our dictionary.  
+    + In case of missing the first word, we will ultilize the bi-gram dictionary to predict word 3. In this dictionary, word 1 will be `*` (missed or unknown), word 2 will be used to match the last input word and word 3 is our prediction. This dictionary is also in descesding order by frequency of bi-gram (word 2 and word 3) and whenever tie by frequency of one-gram (word 3).  
+    + In case of missing the second word, we again use data from tri-gram for the prediction. However, word 2 in the tri-gram dictionary will now be overwritten by `*`. This strategy means that, we will find the most frequent combination of word 1 and word 3 when they appear together in a tri-gram but we do not care about word 2 (it can be anything). This dictionary is also in descesding order by frequency of tri-gram and whenever tie by frequency of one-gram (word 3).  
+    + These two dictionaries will be put under the tri-gram dictionary so that we prioritizing prediction in the case of non-missing input data.  
+    
+### 4.2. Tri-gram dictionary  
+```{r tgd1, echo=FALSE}
+tg.dict <- tg.dict[,1:4]
+bg.dict <- bg.dict[,1:3]
+```
+We have already built and ordered the tri-gram dictionary. Now we add the frequencies of bi-gram and one-gram to solve tie situation.  
+```{r tgd2, cache=TRUE}
+# Order data where tie frequency based on bi-gram and one-gram frequencies
+# Merge tri-gram and bi-gram
+names(bg.dict) <- c("word 2","word 3","bigram frequency")
+bg.dict$bi.key <- paste(bg.dict$`word 2`,bg.dict$`word 3`)
+tg.dict$bi.key <- paste(tg.dict$`word 2`,tg.dict$`word 3`)
+world.dict <- merge(tg.dict, bg.dict[,3:4], by="bi.key", all.x=T)
+# Merge tri-gram and one-gram
+names(og.dict) <- c("word 3","onegram frequency")
+world.dict <- merge(world.dict,og.dict, by = "word 3", all.x=T)
+# Now order based on frequency of tri-gram > bi-gram > one-gram and then alphabet
+world.dict <- world.dict[order(-world.dict$frequency, 
+                               -world.dict$`bigram frequency`,
+                               -world.dict$`onegram frequency`,
+                               world.dict$`word 1`,
+                               world.dict$`word 2`,
+                               world.dict$`word 3`), ]
+# Build this dict before subset
+second.dict <- world.dict
+# Keep only the words
+world.dict <- world.dict[,c(3,4,1)]
+head(world.dict,10)
+```
+
+### 4.3. Bi-gram dictionary for missing first word  
+We have already built and ordered the bi-gram dictionary. Now we add word 1 as missed or unknown and also add the frequencies of one-gram to solve tie situation.  
+```{r bgd1, cache=TRUE}
+# Order data where tie frequency based on one-gram frequencies
+first.dict <- merge(bg.dict,og.dict, by = "word 3", all.x=T)
+# Now order by bi-gram > one-gram and then alphabet
+first.dict <- first.dict[order(-first.dict$`bigram frequency`,
+                         -first.dict$`onegram frequency`,
+                         first.dict$`word 2`,
+                         first.dict$`word 3`), ]
+# Adding the first word as missed or unknown to the dictionary
+first.dict$`word 1` <- rep("*", nrow(first.dict))
+# Keep only the words
+first.dict <- first.dict[,c(6,2,1)]
+head(first.dict,10)
+```
+
+### 4.4. Tri-gram dictionary for missing second word  
+From the built and ordered tri-gram dictionary, we replace the second word with `*` to make the final dictionary. We need to aggregate the frequency since replacing the second word with `*` results in many similar combination of word 1 and word 3.  
+```{r sd1, cache=TRUE}
+# Order data where tie frequency based on one-gram frequencies
+second.dict$`word 2` <- rep("*", nrow(second.dict))
+second.dict <- second.dict[,c(3,4,1,5,7)]
+# Aggregate frequency
+second.dict <- aggregate(cbind(frequency,`onegram frequency`) ~ 
+              `word 1` + `word 2` + `word 3`, data=second.dict, sum)
+```
+Afterward, we reorder the dictionary.  
+```{r sd2, cache=TRUE}
+# Now order by tri-gram > one-gram and then alphabet
+second.dict <- second.dict[order(second.dict$`word 1`,
+                                 -second.dict$frequency,
+                                 -second.dict$`onegram frequency`,
+                                 second.dict$`word 3`), ]
+# Keep only the words
+second.dict <- second.dict[,c(1,2,3)]
+head(second.dict,10)
+```
+Some post-processing need to be done.  
+```{r sd3, cache=TRUE}
+# Combine dictionaries
+world.dict <- rbind(world.dict,first.dict,second.dict)
+# Remove profanity (appendix 5.5)
+world.dict <- remove_profane(world.dict)
+# Remove row names to reduce memory size
+row.names(world.dict) <- c()
+dim(world.dict)
+object.size(world.dict)
+```
+The final dictionary contains 852164 tri-grams and has the size of 25MB.  
+
+### 4.5. Prediction function  
+After building the dictionary, we need a function to take the input text, preprocess the text, extract the last two words, search through the dictionary and return three possible prediction of the next word.  
+```{r fun}
+ngram_model <- function(input.text) {
+    if(is.na(input.text)) stop()
+    # Clean the text first
+    clean.text <- tolower(input.text)
+    # Remove unwanted characters
+    clean.text <- remove_unwant.char(clean.text)
+    text.vector <- words(clean.text)[nchar(words(clean.text)) > 1]
+    # Extract two last words
+    if (length(text.vector) == 0) {
+        stop() # Case of no input
+    } else if (length(text.vector) == 1) {
+        first.word <- "*" # Case of only one input word
+        second.word <- text.vector[length(text.vector)]
+    } else if (length(text.vector) > 1) {
+        first.word <- text.vector[length(text.vector) - 1]
+        second.word <- text.vector[length(text.vector)]
+    }
+    # Match and extract prediction data frame
+    pred <- world.dict[(world.dict$`word 1` == first.word |world.dict$`word 1` == "*") &
+                   (world.dict$`word 2` == second.word |world.dict$`word 2` == "*"), ]
+    # Avoid similar prediction
+    pred <- pred[!duplicated(pred$`word 3`), ]
+    # Return three possibilities of the third word
+    return(head(pred$`word 3`,3))
+}
+```
+An example of prediction.  
+```{r exam}
+# Sample
+"At least eight CNN anchors, correspondents, and reporters are pregnant or have given birth in the past year, and that's if you count only staffers."
+# Prediction
+ngram_model("At least eight CNN anchors, correspondents, and reporters are pregnant or have given birth in the past year, and that's if")
+# Run-time of the prediction
+system.time(ngram_model("At least eight CNN anchors, correspondents, and reporters are pregnant or have given birth in the past year, and that's if"))
+```
+We can see that the model gives good result, and the execution time is very fast.
+
+## 5. Appendix  
+### 5.1. Used library  
+```{r a1, eval=FALSE}
+library(tm)
+library(ggplot2)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(data.table)
+library(reshape2)
+library(glue)
+```
+### 5.2. Preprocessing functions  
+```{r a2, eval=FALSE}
+# a) Function to sampling a small part of the whole dataset
+sampling <- function(text.files, percentage, seed) {
+    for (i in text.files) {
+        con <- file(i, "r") # Open a connection
+        text.dat <- readLines(con) # Read data
+        
+        for (j in percentage) {
+            set.seed(seed)
+            seclect_line = as.logical(rbinom(n=length(text.dat), size=1, prob=j/100))
+            text.sample <- text.dat[seclect_line]
+            dir.name <- paste("sample_", j,"pct", sep="")
+            if(!dir.exists(dir.name)) dir.create(dir.name) # Make directory if not exit
+            write(text.sample, file = paste(dir.name, "/", j,"pct_", i, sep="")) # Write to file
+        }
+        close(con) # Close connection
+    }
+} 
+
+# b) Function to remove unwanted characters
+remove_unwant.char <- function(text.dat){
+    # Text must be lower case first
+    # remove @ from emails
+    text.dat <- gsub("[^ ]{1,}@[^ ]{1,}", " ", text.dat)
+    text.dat <- gsub(" @[^ ]{1,}", " ", text.dat)
+    # remove # from hash tags
+    text.dat <- gsub("#[^ ]{1,}", " ", text.dat) 
+    # remove :// characters from websites and file systems
+    text.dat <- gsub("[^ ]{1,}://[^ ]{1,}", " ", text.dat) 
+    # remove unwanted non-alphabetical character
+    text.dat <- gsub("[`’‘]", "'", text.dat) # first replace ` ’‘ by '
+    text.dat <- gsub("[^a-z']", " ", text.dat) # remove characters that are not alphabet nor '
+    text.dat <- gsub("'{2,}", "'", text.dat) # replace '' by '
+    text.dat <- gsub("' ", " ", text.dat) # remove ' at the end of a word
+    text.dat <- gsub(" '", " ", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("^'", "", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("'$", "", text.dat) # remove ' at the end of a word
+    return(text.dat)
+}
+
+# c) Custom function for bi-gram and tri-gram 
+BigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 2), paste, 
+                  collapse = " "), use.names = FALSE)}
+TrigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 3), paste, 
+                  collapse = " "), use.names = FALSE)}
+```
+### 5.3. Functions used in making dictionary  
+```{r a3, eval=FALSE}
+# a) Function to make dictionary
+make_dict <- function(text.source, table="cumsum", tokenize=NA) {
+    if (!table %in% c("freq","frac","cumsum")) stop("Wrong table")
+    if (!tokenize %in% c(NA,"bigram","trigram")) stop("Wrong tokenize")
+    # Load text
+    raw.text <- VCorpus(DirSource(text.source))
+    # Pre-processing
+    # Transform to lower case
+    clean.text <- tm_map(raw.text, content_transformer(tolower))
+    # Remove unwanted characters
+    clean.text <- tm_map(clean.text, content_transformer(remove_unwant.char))
+    # Strip white sapce
+    clean.text <- tm_map(clean.text,stripWhitespace) 
+    # Compute term document matrix
+    if (is.na(tokenize)) tdm <- TermDocumentMatrix(clean.text, control=list(wordLengths=c(2,Inf)))
+    else if (tokenize == "bigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=BigramTokenizer))
+    else if (tokenize == "trigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=TrigramTokenizer))
+    
+    # Compute frequency table
+    freq.table <- data.frame(as.matrix(tdm))
+    freq.table$total <- rowSums(freq.table)
+    names(freq.table) <- c("blogs","news","twitter","total")
+    freq.table <- freq.table[order(freq.table$total, decreasing = T), ] # Reorder based on total frequency (so you weight every source equally)
+    if (table == "freq") return(freq.table)
+    else if(table == "frac") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        return(frac.table) 
+    } 
+    else if (table == "cumsum") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        # Compute cumulative fraction table
+        cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+        cumsum.table$nword <- seq(1:nrow(cumsum.table))
+        return(cumsum.table)
+    }
+}
+
+# b) Function to select words that can cover a specific fraction of the sources
+select_word <- function(cumfrac, percentile) {
+    # Find the closest number of word to percentile
+    nword <- which.min(abs(cumfrac - percentile))
+    sel <- c(1:nword)
+    # There are words that do not appear in a source but still are high 
+    # fraction in other sources so that it appear at high ranked, this zero is to remove those word
+    good <- !duplicated(cumfrac[sel]) # If the word is not in the dictionary, the cumulative fraction won't change
+    sel <- sel[good]
+    return(sel)
+}
+
+# c) Function to extract dictionary based on a certain percentile of total of souces
+extract_dict <- function(freq.table, percentile) {
+    frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+    cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+    sel <- select_word(cumsum.table$total, percentile)
+    return(freq.table[sel, ])
+}
+
+# d) Function to split and process bigram, trigram dicionary
+process_ngram <- function(ngram.dict) {
+    ngram.str <- strsplit(row.names(ngram.dict), split = " ")
+    # Count the number of gram
+    ngram <- length(ngram.str[[1]])
+    # Create a vector and boolean vector to select word
+    ngram.str <- unlist(ngram.str)
+    sel.ngram.str <- rep(1:ngram, nrow(ngram.dict))
+    # Make new data frame
+    new.dict <- data.frame(ngram.str[sel.ngram.str == 1])
+    if (ngram > 1) {
+        for (i in 2:ngram) {
+            new.dict[[i]] <- cbind(ngram.str[sel.ngram.str == i])
+        }
+    }
+    names(new.dict) <- paste("word",1:ngram)
+    new.dict$frequency <- ngram.dict$total
+    return(new.dict)
+}
+```
+### 5.4. Summarizing function  
+```{r a4, eval=FALSE}
+# Function to return a table comparing between dictionaries
+compare_table <- function(dict) {
+    compare.table <- data.frame()
+    for (i in 1:length(dict)) {
+        for(j in 1:length(dict)) {
+            if (j == i) compare.table[i,j] <- length(dict[[i]])
+            else compare.table[i,j] <- round(100*length(intersect(dict[[i]],dict[[j]]))/length(dict[[i]]),0)
+        } 
+    }
+    names(compare.table) <- names(dict)
+    row.names(compare.table) <- names(dict)
+    return(compare.table)
+}
+```
+### 5.5. Removal of profanity  
+Reference for swear words <https://en.wiktionary.org/wiki/Category:English_swear_words>  
+```{r a5, eval=FALSE}
+# Remove profanity
+remove_profane <- function(dict) {
+    # Prepare a pattern
+    profane <- glue_collapse(profane.words,sep="|")
+    unsel <- vector(mode = "integer")
+    # Remove via each column
+    for(i in 1:ncol(dict)) {
+        unsel <- c(unsel,grep(profane,dict[[i]]))
+    }
+    unsel <- unique(unsel)
+    dict <- dict[-unsel, ]
+    return(dict)
+}
+```

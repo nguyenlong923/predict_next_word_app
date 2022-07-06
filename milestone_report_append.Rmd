@@ -1,0 +1,188 @@
+---
+title: 'Capstone Project: N-gram model for predicting the next word'
+author: "Long Nguyen Hoang"
+date: "12/5/2018"
+output: html_document
+subtitle: Milestone Report Appendix
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_knit$set(root.dir="/Users/longnguyenhoang/Documents/Course/Coursera/Data\ Science\ Specialization/10\ Capstone\ Project/final/en_US/") 
+```
+
+## 5. Appendix  
+### 5.1. Used library  
+```{r a1, eval=FALSE}
+library(tm)
+library(ggplot2)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(data.table)
+library(reshape2)
+library(glue)
+```
+### 5.2. Preprocessing functions  
+```{r a2, eval=FALSE}
+# a) Function to sampling a small part of the whole dataset
+sampling <- function(text.files, percentage, seed) {
+    for (i in text.files) {
+        con <- file(i, "r") # Open a connection
+        text.dat <- readLines(con) # Read data
+        
+        for (j in percentage) {
+            set.seed(seed)
+            seclect_line = as.logical(rbinom(n=length(text.dat), size=1, prob=j/100))
+            text.sample <- text.dat[seclect_line]
+            dir.name <- paste("sample_", j,"pct", sep="")
+            if(!dir.exists(dir.name)) dir.create(dir.name) # Make directory if not exit
+            write(text.sample, file = paste(dir.name, "/", j,"pct_", i, sep="")) # Write to file
+        }
+        close(con) # Close connection
+    }
+} 
+
+# b) Function to remove unwanted characters
+remove_unwant.char <- function(text.dat){
+    # Text must be lower case first
+    # remove @ from emails
+    text.dat <- gsub("[^ ]{1,}@[^ ]{1,}", " ", text.dat)
+    text.dat <- gsub(" @[^ ]{1,}", " ", text.dat)
+    # remove # from hash tags
+    text.dat <- gsub("#[^ ]{1,}", " ", text.dat) 
+    # remove :// characters from websites and file systems
+    text.dat <- gsub("[^ ]{1,}://[^ ]{1,}", " ", text.dat) 
+    # remove unwanted non-alphabetical character
+    text.dat <- gsub("[`’‘]", "'", text.dat) # first replace ` ’‘ by '
+    text.dat <- gsub("[^a-z']", " ", text.dat) # remove characters that are not alphabet nor '
+    text.dat <- gsub("'{2,}", "'", text.dat) # replace '' by '
+    text.dat <- gsub("' ", " ", text.dat) # remove ' at the end of a word
+    text.dat <- gsub(" '", " ", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("^'", "", text.dat) # remove ' at the beginning of a word
+    text.dat <- gsub("'$", "", text.dat) # remove ' at the end of a word
+    return(text.dat)
+}
+
+# c) Custom function for bi-gram and tri-gram 
+BigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 2), paste, 
+                  collapse = " "), use.names = FALSE)}
+TrigramTokenizer <- function(text.dat){
+    unlist(lapply(ngrams(words(text.dat)[nchar(words(text.dat)) > 1], 3), paste, 
+                  collapse = " "), use.names = FALSE)}
+```
+### 5.3. Functions used in making dictionary  
+```{r a3, eval=FALSE}
+# a) Function to make dictionary
+make_dict <- function(text.source, table="cumsum", tokenize=NA) {
+    if (!table %in% c("freq","frac","cumsum")) stop("Wrong table")
+    if (!tokenize %in% c(NA,"bigram","trigram")) stop("Wrong tokenize")
+    # Load text
+    raw.text <- VCorpus(DirSource(text.source))
+    # Pre-processing
+    # Transform to lower case
+    clean.text <- tm_map(raw.text, content_transformer(tolower))
+    # Remove unwanted characters
+    clean.text <- tm_map(clean.text, content_transformer(remove_unwant.char))
+    # Strip white sapce
+    clean.text <- tm_map(clean.text,stripWhitespace) 
+    # Compute term document matrix
+    if (is.na(tokenize)) tdm <- TermDocumentMatrix(clean.text, control=list(wordLengths=c(2,Inf)))
+    else if (tokenize == "bigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=BigramTokenizer))
+    else if (tokenize == "trigram") tdm <- TermDocumentMatrix(clean.text, control=list(tokenize=TrigramTokenizer))
+    
+    # Compute frequency table
+    freq.table <- data.frame(as.matrix(tdm))
+    freq.table$total <- rowSums(freq.table)
+    names(freq.table) <- c("blogs","news","twitter","total")
+    freq.table <- freq.table[order(freq.table$total, decreasing = T), ] # Reorder based on total frequency (so you weight every source equally)
+    if (table == "freq") return(freq.table)
+    else if(table == "frac") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        return(frac.table) 
+    } 
+    else if (table == "cumsum") {
+        frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+        # Compute cumulative fraction table
+        cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+        cumsum.table$nword <- seq(1:nrow(cumsum.table))
+        return(cumsum.table)
+    }
+}
+
+# b) Function to select words that can cover a specific fraction of the sources
+select_word <- function(cumfrac, percentile) {
+    # Find the closest number of word to percentile
+    nword <- which.min(abs(cumfrac - percentile))
+    sel <- c(1:nword)
+    # There are words that do not appear in a source but still are high 
+    # fraction in other sources so that it appear at high ranked, this zero is to remove those word
+    good <- !duplicated(cumfrac[sel]) # If the word is not in the dictionary, the cumulative fraction won't change
+    sel <- sel[good]
+    return(sel)
+}
+
+# c) Function to extract dictionary based on a certain percentile of total of souces
+extract_dict <- function(freq.table, percentile) {
+    frac.table <- data.frame(apply(freq.table, MARGIN = 2, FUN = function(x) 100*x/sum(x))) # Convert from frequency to fraction
+    cumsum.table <- data.frame(apply(frac.table, MARGIN = 2, cumsum))
+    sel <- select_word(cumsum.table$total, percentile)
+    return(freq.table[sel, ])
+}
+
+# d) Function to split and process bigram, trigram dicionary
+process_ngram <- function(ngram.dict) {
+    ngram.str <- strsplit(row.names(ngram.dict), split = " ")
+    # Count the number of gram
+    ngram <- length(ngram.str[[1]])
+    # Create a vector and boolean vector to select word
+    ngram.str <- unlist(ngram.str)
+    sel.ngram.str <- rep(1:ngram, nrow(ngram.dict))
+    # Make new data frame
+    new.dict <- data.frame(ngram.str[sel.ngram.str == 1])
+    if (ngram > 1) {
+        for (i in 2:ngram) {
+            new.dict[[i]] <- cbind(ngram.str[sel.ngram.str == i])
+        }
+    }
+    names(new.dict) <- paste("word",1:ngram)
+    new.dict$frequency <- ngram.dict$total
+    return(new.dict)
+}
+```
+### 5.4. Summarizing function  
+```{r a4, eval=FALSE}
+# Function to return a table comparing between dictionaries
+compare_table <- function(dict) {
+    compare.table <- data.frame()
+    for (i in 1:length(dict)) {
+        for(j in 1:length(dict)) {
+            if (j == i) compare.table[i,j] <- length(dict[[i]])
+            else compare.table[i,j] <- round(100*length(intersect(dict[[i]],dict[[j]]))/length(dict[[i]]),0)
+        } 
+    }
+    names(compare.table) <- names(dict)
+    row.names(compare.table) <- names(dict)
+    return(compare.table)
+}
+```
+### 5.5. Removal of profanity  
+Reference for swear words <https://en.wiktionary.org/wiki/Category:English_swear_words>  
+```{r a5, eval=FALSE}
+# Remove profanity
+remove_profane <- function(dict) {
+    # Prepare a pattern
+    profane <- glue_collapse(profane.words,sep="|")
+    unsel <- vector(mode = "integer")
+    # Remove via each column
+    for(i in 1:ncol(dict)) {
+        unsel <- c(unsel,grep(profane,dict[[i]]))
+    }
+    unsel <- unique(unsel)
+    dict <- dict[-unsel, ]
+    return(dict)
+}
+```
